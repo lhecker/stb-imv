@@ -17,12 +17,6 @@
 */
 
 
-// Set section alignment to minimize alignment overhead
-
-#if (_MSC_VER < 1300)
-#pragma comment(linker, "/FILEALIGN:0x200")
-#endif
-
 #define _WIN32_WINNT 0x0500
 #include <windows.h>
 #include <stdio.h>
@@ -33,12 +27,13 @@
 #include <math.h>
 
 #define STB_DEFINE
+#define STB_THREADS
 #include "stb.h"          /*     http://nothings.org/stb.h         */
 
 // general configuration options
 
 #ifndef USE_STBI
-#define USE_STBI 1
+#define USE_STBI 0
 #endif
 
 #ifndef USE_GDIPLUS
@@ -62,7 +57,7 @@
 #define STBI_NO_STDIO
 #define STBI_NO_WRITE
 #include "stb_image.c"    /*     http://nothings.org/stb_image.c   */
-#endif 
+#endif
 
 #include "resource.h"
 
@@ -173,15 +168,6 @@ void platformDrawBitmap(HDC hdc, int x, int y, unsigned char *bits, int w, int h
          *(uint32 *)(bits+i) = (*(uint32 *)(bits+i) << 1);
 }
 
-// memory barrier for x86
-void barrier(void)
-{
-    long dummy;
-    __asm {
-        xchg dummy, eax
-    }
-}
-
 // awake the main thread when something interesting happens
 void wake(int message)
 {
@@ -191,7 +177,7 @@ void wake(int message)
 typedef struct
 {
    int x,y;         // size of the image
-   int stride;      // distance between rows in bytes  
+   int stride;      // distance between rows in bytes
    int frame;       // does this image have a frame (border)?
    uint8 *pixels;   // pointer to (0,0)th pixel
    int had_alpha;   // did this have alpha and we statically overwrote it?
@@ -315,15 +301,15 @@ void *diskload_task(void *p)
 
             // read the data
             data = stb_file(dc.files[i]->filename, &n);
-         
+
             // update the results
             // don't need to mutex these, because we own them via ->status
             if (data == NULL) {
                o(("READ: error reading\n"));
-               dc.files[i]->error = strdup("can't open");
+               dc.files[i]->error = _strdup("can't open");
                dc.files[i]->filedata = NULL;
                dc.files[i]->len = 0;
-               barrier();
+               stb_barrier();
                dc.files[i]->status = LOAD_error_reading;
                wake(WM_APP_LOAD_ERROR); // wake main thread to react to error
             } else {
@@ -332,7 +318,7 @@ void *diskload_task(void *p)
                assert(dc.files[i]->filedata == NULL);
                dc.files[i]->filedata = data;
                dc.files[i]->len = n;
-               barrier();
+               stb_barrier();
                dc.files[i]->status = LOAD_reading_done;
                stb_sem_release(decode_queue); // wake the decode task if needed
             }
@@ -551,8 +537,8 @@ void *decode_task(void *p)
 
          if (data == NULL) {
             // error reading file, record the reason for it
-            f->error = strdup(imv_failure_reason());
-            barrier();
+            f->error = _strdup(imv_failure_reason());
+            stb_barrier();
             f->status = LOAD_error_reading;
             // wake up the main thread in case this is the most recent image
             wake(WM_APP_DECODE_ERROR);
@@ -560,7 +546,7 @@ void *decode_task(void *p)
             // post-process the image into the right format
             f->image = (Image *) malloc(sizeof(*f->image));
             make_image(f->image, x, y,data, loaded_as_rgb, n);
-            barrier();
+            stb_barrier();
             f->status = LOAD_available;
 
             // wake up the main thread in case this is the most recent image
@@ -731,7 +717,7 @@ void set_error(volatile ImageFile *z)
    imfree(cur);
    cur = NULL;
    free(cur_filename);
-   cur_filename = strdup(z->filename);
+   cur_filename = _strdup(z->filename);
    source_c = (ImageFile *) z;
    source = NULL;
 }
@@ -957,7 +943,7 @@ void queue_resize(int w, int h, ImageFile *src_c, int immediate)
       // store data to come back for later
       pending_resize.image = NULL;
       pending_resize.image_c = src_c;
-      pending_resize.filename = strdup(src_c->filename);
+      pending_resize.filename = _strdup(src_c->filename);
       // run the resizer in the background (equivalent to the call below)
       stb_workq(resize_workers, work_resize, &res, &pending_resize.image);
    } else {
@@ -1143,7 +1129,7 @@ void size_to_current(int maximize)
 
       // build the new one
       cur = bmp_alloc(w2,h2);
-      cur_filename = strdup(source_c->filename);
+      cur_filename = _strdup(source_c->filename);
       // build a frame around the data
       frame(cur);
       // copy the raw data in
@@ -1325,7 +1311,7 @@ int StringCompare(char *a, char *b)
 	{
       // if strings differ only by leading 0s, use case-insensitive ASCII sort
       // (note, we should work this out more efficiently by noticing which one changes length first)
-      int z = stricmp(orig_a, orig_b);
+      int z = _stricmp(orig_a, orig_b);
       if (z) return z;
       // if identical case-insensitive, return ASCII sort
       return strcmp(orig_a, orig_b);
@@ -1343,12 +1329,12 @@ char *open_filter = "Image Files\0*.jpg;*.jpeg;*.png;*.bmp;*.tga;*.hdr;*.spk\0";
 void init_filelist(void)
 {
    char **image_files; // stb_arr (dynamic array type) of filenames
-   char *to_free = NULL; 
+   char *to_free = NULL;
    int i;
    if (fileinfo) {
       // cache the current filename so we can look for it in the list below
       // @BUG: is this leaking the old filename?
-      filename = to_free = strdup(fileinfo[cur_loc].filename);
+      filename = to_free = _strdup(fileinfo[cur_loc].filename);
       free_fileinfo();
    }
 
@@ -1368,8 +1354,8 @@ void init_filelist(void)
    cur_loc = 0;
    for (i=0; i < stb_arr_len(image_files); ++i) {
       fileinfo[i].filename = image_files[i];
-      fileinfo[i].lru = 0;      
-      if (!stricmp(image_files[i], filename))
+      fileinfo[i].lru = 0;
+      if (!_stricmp(image_files[i], filename))
          cur_loc = i;
    }
 
@@ -1378,14 +1364,14 @@ void init_filelist(void)
    // @TODO: why didn't this hurt? if (to_free) free(to_free);
 
    // free the stb_readdir() array, but not the filenames themselves
-   stb_arr_free(image_files); 
+   stb_arr_free(image_files);
 }
 
 // current lru timestamp
 int lru_stamp=1;
 
 // maximum size of the cache
-int max_cache_bytes = 256 * (1 << 20); // 256 MB; one 5MP image is 20MB
+SIZE_T max_cache_bytes = 256 * (1 << 20); // 256 MB; one 5MP image is 20MB
 
 // minimum number of cache entries
 #define MIN_CACHE  3    // always keep 3 images cached, to allow prefetching
@@ -1395,7 +1381,7 @@ int ImageFilePtrCompare(const void *p, const void *q)
 {
    ImageFile *a = *(ImageFile **) p;
    ImageFile *b = *(ImageFile **) q;
-   return (a->lru < b->lru) ? -1 : (a->lru > b->lru);   
+   return (a->lru < b->lru) ? -1 : (a->lru > b->lru);
 }
 
 // see if we should flush any data. we should flush if
@@ -1430,8 +1416,8 @@ void flush_cache(int locked)
    // sort by lru
    qsort((void *) list, n, sizeof(*list), ImageFilePtrCompare);
 
-   // now we free earliest slots on the list... 
-   
+   // now we free earliest slots on the list...
+
    // we could just leave the cache locked the whole time, but will be slightly smarter
    if (!locked) stb_mutex_begin(cache_mutex);
 
@@ -1520,7 +1506,7 @@ void queue_disk_command(DiskCommand *dc, int which, int make_current)
          }
          return;
       }
-      
+
       // z->status == LOAD_inactive
       // "fall through" to after the if, below
    } else {
@@ -1540,7 +1526,7 @@ void queue_disk_command(DiskCommand *dc, int which, int make_current)
       z = &cache[i];
       free(z->filename);
       assert(z->filedata == NULL);
-      z->filename = strdup(filename);
+      z->filename = _strdup(filename);
       z->lru = 0;
       z->status = LOAD_inactive;
       stb_sdict_add(file_cache, filename, (void *) z);
@@ -1841,7 +1827,7 @@ void mouse(UINT ev, int x, int y)
             case MODE_none:
                break;
 
-            // in drag mode, a mouse move just moves the window 
+            // in drag mode, a mouse move just moves the window
             case MODE_drag: {
                RECT rect;
                GetWindowRect(win, &rect);
@@ -1889,7 +1875,7 @@ void mouse(UINT ev, int x, int y)
    }
 }
 
-static unsigned int physmem; // available physical memory according to GlobalMemoryStatus
+static SIZE_T physmem; // available physical memory according to GlobalMemoryStatus
 
 char *reg_root = "Software\\SilverSpaceship\\imv";
 HKEY zreg;
@@ -2142,7 +2128,7 @@ BOOL CALLBACK PrefDlgProc(HWND hdlg, UINT imsg, WPARAM wparam, LPARAM lparam)
 #endif //USE_STBI
                new_border     = BST_CHECKED == SendMessage(GetDlgItem(hdlg,DIALOG_showborder),BM_GETCHECK,0,0);
 
-               // if alpha_background changed, clear the cache of any images that used it                
+               // if alpha_background changed, clear the cache of any images that used it
                if (memcmp(alpha_background, curc, 6)) {
                   clear_cache(1);
                   // force a reload of the current image
@@ -2194,7 +2180,7 @@ void performance_test(void)
    int len,i;
    uint8 *buffer = stb_file(cur_filename, &len);
    if (buffer == NULL) return;
-   
+
    t1 = timeGetTime();
 
    for (i=0; i < 50; ++i) {
@@ -2315,7 +2301,7 @@ int WINAPI MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
          if (zdelta < 0) resize(-1);
          break;
       }
-         
+
       case WM_MOUSEMOVE:
       case WM_LBUTTONDOWN:
       case WM_RBUTTONDOWN:
@@ -2615,7 +2601,7 @@ int WINAPI MainWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
       default:
          return DefWindowProc (hWnd, uMsg, wParam, lParam);
    }
-  
+
    return 1;
 }
 
@@ -2631,8 +2617,6 @@ int cur_is_current(void)
 }
 
 #if USE_GDIPLUS
-typedef ULONG ULONG_PTR;
-
 static Bool GdiplusPresent;
 static ULONG_PTR GpToken;
 static Bool LoadGdiplus(void);
@@ -2663,7 +2647,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
    // initial loaded image
    int image_x, image_y, image_loaded_as_rgb, image_n;
-   unsigned char *image_data;
+   unsigned char *image_data = NULL;
 
    inst = hInstance;
 
@@ -2765,7 +2749,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
          filename = filenamebuffer;
       }
    }
-   
+
    // allocate worker threads
    resize_workers = stb_workq_new(resize_threads, resize_threads * 4);
 
@@ -2818,7 +2802,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
    cache[0].status = LOAD_available;
    cache[0].image = source;
    cache[0].lru = lru_stamp++;
-   cache[0].filename = strdup(filename);
+   cache[0].filename = _strdup(filename);
    file_cache = stb_sdict_new(1);
    stb_sdict_add(file_cache, filename, (void *) &cache[0]);
    source_c = (ImageFile *) &cache[0];
@@ -2855,7 +2839,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
       //cx = GetSystemMetrics(SM_CXSCREEN);
       //cy = GetSystemMetrics(SM_CYSCREEN);
 
-      // determine an initial window size, and resize 
+      // determine an initial window size, and resize
       ideal_window_size(w2,h2, &w,&h, &x,&y, cx,cy);
 
       // if the size exactly matches, don't resize, just copy
@@ -2880,7 +2864,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
          cur = pending_resize.image;
          pending_resize.image = NULL;
       }
-      cur_filename = strdup(filename);
+      cur_filename = _strdup(filename);
       if (!show_frame) {
          x += FRAME;
          y += FRAME;
@@ -2948,7 +2932,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                // free the current image we're about to write over
                imfree(cur);
                cur = pending_resize.image;
-               // pending_resize.filename was strdup()ed, so just take ownership of it
+               // pending_resize.filename was _strdup()ed, so just take ownership of it
                cur_filename = pending_resize.filename;
                pending_resize.filename = NULL;
 
@@ -2967,10 +2951,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                //MoveWindow(hWnd,pending_resize.size.x, pending_resize.size.y, pending_resize.size.w, pending_resize.size.h, FALSE);
 
                // clear the resize request info
-               barrier();
+               stb_barrier();
                pending_resize.size.w = 0;
 
-               // paint the window              
+               // paint the window
                hdc = GetDC(win);
                display(hWnd, hdc);
                ReleaseDC(win, hdc);
@@ -3187,7 +3171,7 @@ static Color lerp(Color dest, Color src, uint8 a)
    return (rb & 0xff00ff) + (ga & 0xff00ff00);
 }
 
-#if 1
+#if 0
 
 
 #define SSE __declspec(align(16))
@@ -3404,7 +3388,7 @@ Image *cubic_interp_1d_x(Image *src, int out_w)
    cubic_work.delta = (src->x-1)*65536 / (out_w-1);
    cubic_work.src = src;
    cubic_work.out_len = out_w;
-   barrier();
+   stb_barrier();
 
    if (resize_threads == 1) {
       cubic_interp_1d_x_work(0);
@@ -3453,7 +3437,7 @@ Image *cubic_interp_1d_y(Image *src, int out_h)
    if (resize_threads == 1) {
       cubic_interp_1d_y_work(0);
    } else {
-      barrier();
+      stb_barrier();
       stb_sync_set_target(resize_merge, resize_threads);
       for (i=1; i < resize_threads; ++i)
          stb_workq_reach(resize_workers, (stb_thread_func) cubic_interp_1d_y_work, (void *) i, NULL, resize_merge);
@@ -3507,7 +3491,7 @@ Image *downsample_two_thirds(Image *src)
       Color *src2 = PLUS(src1, src->stride);
       // use (2/3,1/3) and (1/3,2/3), which amounts to:
       //    A B C     W  X
-      //    D E F  -> 
+      //    D E F  ->
       //    G H I     Y  Z
 
       // W = A*4/9 + B * 2/9 + D * 2/9 + E * 1/9
@@ -3529,7 +3513,7 @@ Image *downsample_two_thirds(Image *src)
                  + ((src1[1] >> 3) & 0x1f1f1f1f);
          src0 += 3;
          src1 += 3;
-         src2 += 3;         
+         src2 += 3;
       }
    }
 
@@ -3714,7 +3698,7 @@ static GdiplusStartupOutput gpStartupOutput;
 // from GdiplusHeaders.h
 typedef void GpImage; // opaque type
 
-typedef struct { 
+typedef struct {
    GpImage* nativeImage;
    GpStatus lastResult;
    GpStatus loadStatus;
@@ -3737,7 +3721,7 @@ typedef INT GpPixelFormat;
 // bits 24-31 = reserved
 #define GpPixelFormatGDI       0x00020000 // Is a GDI-supported format
 #define GpPixelFormatAlpha     0x00040000 // Has an alpha component
-#define GpPixelFormatCanonical 0x00200000 
+#define GpPixelFormatCanonical 0x00200000
 #define GpPixelFormat24bppRGB  (8  | (24 << 8) | GpPixelFormatGDI)
 #define GpPixelFormat32bppARGB (10 | (32 << 8) | GpPixelFormatAlpha | GpPixelFormatGDI | GpPixelFormatCanonical)
 
@@ -3874,7 +3858,7 @@ static uint8 *LoadImageWithGdiplus(uint8 *mem, int len, int *x, int *y, int *n, 
    ret = (uint8*)malloc(image_sz);
    for (i=0; i<data.Height; ++i)
       memcpy(&ret[i*data.Width*n_req], &((uint8*)data.Scan0)[i*data.Stride], data.Width*n_req);
-    
+
 liwgExit:
    if (data.Scan0) GdipBitmapUnlockBits(bitmap, &data);
    if (bitmap)     GdipDisposeImage(bitmap);
@@ -4021,7 +4005,7 @@ uint8 *LoadImageWithFreeImage(FIMEMORY *fi, int *x, int *y, int *n, int n_req)
       FreeImage_Unload(Bitmap);
    }
    return Result;
-} 
+}
 #endif
 
 static uint8 *imv_decode_from_memory(uint8 *mem, int len, int *x, int *y, Bool* loaded_as_rgb, int *n, int n_req, char *filename)
